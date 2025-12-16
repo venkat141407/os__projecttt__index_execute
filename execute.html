@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Distributed FS — Execution / Simulator</title>
+  <style>
+    body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial;background:#071029;color:#e6eef8;padding:20px}
+    .wrap{max-width:1100px;margin:0 auto}
+    .top{display:flex;justify-content:space-between;align-items:center}
+    .card{background:#081329;padding:14px;border-radius:12px;margin-top:12px}
+    .node-row{display:flex;gap:12px;flex-wrap:wrap}
+    .node{width:170px;padding:12px;border-radius:10px;background:#071228;border:1px solid #12304a}
+    .node.off{opacity:.3}
+    button{padding:8px 12px;border-radius:8px;border:0;background:#1d4ed8;color:white;cursor:pointer}
+    table{width:100%;border-collapse:collapse;margin-top:10px}
+    th,td{border-bottom:1px dashed #13324a;padding:6px;text-align:left}
+    small{color:#93aeda}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <h2>Execution / Simulator</h2>
+      <div>
+        <button id="refreshBtn">Refresh View</button>
+        <button id="repairAll">Repair Under-Replicated</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <strong>Cluster state</strong>
+      <div id="clusterInfo" style="margin-top:8px"></div>
+      <div class="node-row" id="nodes"></div>
+    </div>
+
+    <div class="card" id="fileSection">
+      <strong>Files stored</strong>
+      <div id="filesList"></div>
+    </div>
+
+    <div class="card">
+      <strong>Actions</strong>
+      <div style="margin-top:8px">
+        <button id="simulateFail">Simulate Random Node Failure</button>
+        <button id="simulateRecover">Recover All Nodes</button>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    const STORAGE_KEY='dfs_cluster_v1';
+    function loadCluster(){ try{return JSON.parse(localStorage.getItem(STORAGE_KEY));}catch(e){return null} }
+    function loadFiles(){ try{return JSON.parse(localStorage.getItem('dfs_files')||'{}');}catch(e){return {}} }
+
+    function render(){
+      const cluster = loadCluster();
+      const files = loadFiles();
+      const nodesDiv = document.getElementById('nodes'); nodesDiv.innerHTML='';
+      if(!cluster){document.getElementById('clusterInfo').innerText='No cluster found.'; return}
+      document.getElementById('clusterInfo').innerText = `${cluster.nodes.length} nodes — ${cluster.nodes.filter(n=>n.alive).length} online`;
+
+      cluster.nodes.forEach(n=>{
+        const d = document.createElement('div'); d.className='node'+(n.alive?'':' off');
+        const chunkCount = Object.keys(n.chunks).length;
+        d.innerHTML = `<strong>${n.id}</strong><br><small>${n.alive? 'ONLINE':'OFFLINE'}</small><br><small>chunks: ${chunkCount}</small><div style='margin-top:8px'><button data-node='${n.id}' class='toggleBtn'>${n.alive? 'Fail':'Recover'}</button></div>`;
+        nodesDiv.appendChild(d);
+      });
+
+      // files table
+      const filesList = document.getElementById('filesList'); filesList.innerHTML='';
+      const table = document.createElement('table');
+      const thead = document.createElement('thead'); thead.innerHTML='<tr><th>File ID</th><th>Size</th><th>Chunks</th><th>Actions</th></tr>';
+      table.appendChild(thead);
+      const tbody = document.createElement('tbody');
+      for(const fid in files){
+        const f = files[fid];
+        const tr = document.createElement('tr');
+        const chunkCount = Object.keys(f.chunks).length;
+        tr.innerHTML = `<td>${fid}</td><td>${f.size}</td><td>${chunkCount}</td><td><button data-fid='${fid}' class='inspect'>Inspect</button> <button data-fid='${fid}' class='download'>Reconstruct</button></td>`;
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+      filesList.appendChild(table);
+
+      // attach handlers
+      Array.from(document.querySelectorAll('.toggleBtn')).forEach(b=>b.addEventListener('click', (e)=>{
+        const nid = e.currentTarget.dataset.node; toggleNode(nid); render();
+      }));
+      Array.from(document.querySelectorAll('.inspect')).forEach(b=>b.addEventListener('click', (e)=>inspectFile(e.currentTarget.dataset.fid)));
+      Array.from(document.querySelectorAll('.download')).forEach(b=>b.addEventListener('click', (e)=>reconstructFile(e.currentTarget.dataset.fid)));
+    }
+
+    function toggleNode(nodeId){
+      const cluster = loadCluster();
+      const node = cluster.nodes.find(n=>n.id===nodeId);
+      node.alive = !node.alive;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cluster));
+    }
+
+    function simulateRandomFailure(){
+      const cluster = loadCluster();
+      const alive = cluster.nodes.filter(n=>n.alive);
+      if(alive.length===0){alert('No alive nodes'); return}
+      const pick = alive[Math.floor(Math.random()*alive.length)];
+      pick.alive=false;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cluster));
+      render();
+    }
+
+    function recoverAll(){
+      const cluster = loadCluster();
+      cluster.nodes.forEach(n=>n.alive=true);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cluster));
+      render();
+    }
+
+    function inspectFile(fid){
+      const files = loadFiles(); const f = files[fid]; if(!f){alert('file not found'); return}
+      const rows = [];
+      for(const ck in f.chunks){
+        rows.push(`${ck} -> replicas: ${f.chunks[ck].replicas.join(', ')}`);
+      }
+      alert('Chunks and replicas:\n\n'+rows.join('\n'));
+    }
+
+    function reconstructFile(fid){
+      const files = loadFiles(); const f = files[fid]; if(!f){alert('file not found'); return}
+      const cluster = loadCluster();
+      const pieces = [];
+      const missing = [];
+      // for each chunk, fetch from any alive replica
+      const sortedChunkIds = Object.keys(f.chunks).sort((a,b)=>{
+        const ai = parseInt(a.split('c').pop());
+        const bi = parseInt(b.split('c').pop());
+        return ai-bi;
+      });
+      for(const ck of sortedChunkIds){
+        const entry = f.chunks[ck];
+        let got = null;
+        for(const nodeId of entry.replicas){
+          const node = cluster.nodes.find(n=>n.id===nodeId);
+          if(node && node.alive && node.chunks[ck]){ got = entry.data; break; }
+        }
+        if(got!==null) pieces.push(got); else { missing.push(ck); }
+      }
+      if(missing.length) alert('Cannot reconstruct. Missing chunks: '+missing.join(', '));
+      else {
+        const reconstructed = pieces.join('');
+        // show reconstructed text in new window
+        const w = window.open('', '_blank');
+        w.document.write('<pre>'+escapeHtml(reconstructed)+'</pre>');
+      }
+    }
+
+    function escapeHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+    // Repair under-replicated chunks to meet replication factor saved in files metadata by reading rep count from replicas length
+    function repairReplication(){
+      const cluster = loadCluster(); const files = loadFiles();
+      let repaired = 0;
+      for(const fid in files){
+        const f = files[fid];
+        for(const ck in f.chunks){
+          const entry = f.chunks[ck];
+          // current alive replicas
+          const aliveReplicas = entry.replicas.filter(rid=>{
+            const node = cluster.nodes.find(n=>n.id===rid); return node && node.alive && node.chunks[ck];
+          });
+          const desired = Math.max(1, entry.replicas.length);
+          if(aliveReplicas.length < desired){
+            // find nodes that don't have chunk and are alive
+            const candidates = cluster.nodes.filter(n=>n.alive && !n.chunks[ck]);
+            for(let i=0;i<desired-aliveReplicas.length && i<candidates.length;i++){
+              candidates[i].chunks[ck] = { fileId: fid };
+              entry.replicas.push(candidates[i].id);
+              repaired++;
+            }
+          }
+        }
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cluster));
+      localStorage.setItem('dfs_files', JSON.stringify(files));
+      alert('Repair completed. Created '+repaired+' new replicas (if nodes were available).');
+      render();
+    }
+
+    // attach UI
+    document.getElementById('refreshBtn').addEventListener('click', render);
+    document.getElementById('simulateFail').addEventListener('click', ()=>{ if(confirm('Simulate one random alive node failing?')){ simulateRandomFailure(); } });
+    document.getElementById('simulateRecover').addEventListener('click', ()=>{ if(confirm('Recover all nodes?')){ recoverAll(); } });
+    document.getElementById('repairAll').addEventListener('click', ()=>{ if(confirm('Repair under-replicated chunks to desired replication?')) repairReplication(); });
+
+    // first render
+    render();
+  </script>
+</body>
+</html>

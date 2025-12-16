@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Distributed FS — Frontend</title>
+  <style>
+    :root{font-family:Inter,system-ui,Segoe UI,Roboto,Arial;margin:0;padding:0}
+    body{background:#0f172a;color:#e6eef8;padding:28px}
+    .card{background:linear-gradient(180deg,#0b1220 0%,#071028 100%);border-radius:12px;padding:18px;box-shadow:0 6px 24px rgba(2,6,23,.6);max-width:980px;margin:12px auto}
+    h1{margin:0 0 8px;font-size:22px}
+    p{margin:0 0 12px;color:#a8b6d8}
+    .row{display:flex;gap:12px;align-items:center}
+    .controls{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    input[type=file]{padding:8px}
+    input,select{padding:10px;border-radius:8px;border:1px solid #23314a;background:#071126;color:#e6eef8}
+    button{padding:10px 14px;border-radius:8px;border:0;background:#2563eb;color:white;cursor:pointer}
+    button.ghost{background:transparent;border:1px solid #2b3b63}
+    pre{background:#071126;padding:12px;border-radius:8px;overflow:auto}
+    .node-grid{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}
+    .node{width:140px;padding:12px;border-radius:10px;background:#081226;border:1px solid #12203a}
+    .node.off{opacity:.35}
+    small{color:#8da0cc}
+    .footer{margin-top:12px;color:#9fb1df}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Distributed File System — Frontend</h1>
+    <p>Choose a text file (or paste text), set replication factor and number of simulated nodes. The system will split the file into chunks, distribute them, and open the execution page for simulation.</p>
+
+    <div class="controls">
+      <div>
+        <label><small>Text file input (or leave and paste text below)</small></label>
+        <input id="fileInput" type="file" accept="text/*" />
+      </div>
+      <div>
+        <label><small>Replication factor</small></label>
+        <select id="repFactor">
+          <option value="1">1</option>
+          <option value="2" selected>2</option>
+          <option value="3">3</option>
+        </select>
+      </div>
+      <div>
+        <label><small>Number of nodes</small></label>
+        <select id="numNodes">
+          <option value="3">3</option>
+          <option value="4" selected>4</option>
+          <option value="5">5</option>
+          <option value="6">6</option>
+        </select>
+      </div>
+      <div>
+        <label><small>Chunk size (chars)</small></label>
+        <input id="chunkSize" type="number" value="100" min="10" />
+      </div>
+    </div>
+
+    <div style="margin-top:12px">
+      <label><small>Or paste text to store</small></label>
+      <textarea id="textArea" style="width:100%;height:120px;padding:10px;border-radius:8px;background:#061126;color:#e6eef8;border:1px solid #12203a"></textarea>
+    </div>
+
+    <div style="margin-top:12px" class="row">
+      <button id="storeBtn">Store File (Simulate)</button>
+      <button id="clearBtn" class="ghost">Reset Simulation</button>
+      <button id="goExec" class="ghost">Go to Execution Page</button>
+    </div>
+
+    <div class="node-grid" id="nodeGrid" style="margin-top:16px"></div>
+    <div class="footer">Tip: Open the execution page to see how chunks are spread and how re-replication occurs after node failures.</div>
+  </div>
+
+  <script>
+    // Utility functions
+    const $ = id => document.getElementById(id);
+
+    // Simulated cluster storage key in localStorage
+    const STORAGE_KEY = 'dfs_cluster_v1';
+
+    function initCluster(n){
+      const cluster = { nodes: [] };
+      for(let i=0;i<n;i++){
+        cluster.nodes.push({ id: 'node-'+i, alive: true, chunks: {} });
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cluster));
+      renderNodes();
+    }
+
+    function loadCluster(){
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if(!raw) return null;
+      try{ return JSON.parse(raw);}catch(e){return null}
+    }
+
+    function renderNodes(){
+      const cluster = loadCluster();
+      const grid = $('nodeGrid'); grid.innerHTML='';
+      if(!cluster) return;
+      cluster.nodes.forEach(n =>{
+        const div = document.createElement('div'); div.className='node'+(n.alive?'':' off');
+        div.innerHTML = `<strong>${n.id}</strong><br><small>${n.alive? 'ONLINE':'OFFLINE'}</small><br><small>chunks: ${Object.keys(n.chunks).length}</small>`;
+        grid.appendChild(div);
+      });
+    }
+
+    function resetSimulation(){
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem('dfs_files');
+      initCluster(parseInt($('numNodes').value,10));
+    }
+
+    function splitIntoChunks(text, size){
+      const chunks = [];
+      for(let i=0;i<text.length;i+=size) chunks.push(text.slice(i,i+size));
+      return chunks;
+    }
+
+    function chooseNodesForChunk(cluster, kilo, rep){
+      // simple round-robin/availability-based choose
+      const alive = cluster.nodes.filter(n => n.alive);
+      const chosen = [];
+      if(alive.length===0) return chosen;
+      // shuffle indexes
+      let start = Math.floor(Math.random()*alive.length);
+      for(let i=0;i<rep;i++){
+        chosen.push(alive[(start+i)%alive.length].id);
+      }
+      return chosen;
+    }
+
+    function storeFileSimulation(text, chunkSize, rep){
+      if(!text) return null;
+      const cluster = loadCluster();
+      if(!cluster) return null;
+      const chunks = splitIntoChunks(text, chunkSize);
+      const fileId = 'file-'+Date.now();
+
+      // read existing files map
+      const filesRaw = localStorage.getItem('dfs_files');
+      const files = filesRaw? JSON.parse(filesRaw) : {};
+      files[fileId] = { id:fileId, size:text.length, chunks: {} };
+
+      chunks.forEach((c, idx) =>{
+        const chunkId = fileId+'-c'+idx;
+        files[fileId].chunks[chunkId] = { data: c, replicas: [] };
+        const chosen = chooseNodesForChunk(cluster, chunkId, rep);
+        chosen.forEach(nodeId=>{
+          const node = cluster.nodes.find(n=>n.id===nodeId);
+          node.chunks[chunkId] = { fileId, idx };
+          files[fileId].chunks[chunkId].replicas.push(nodeId);
+        });
+      });
+
+      localStorage.setItem('dfs_cluster_v1', JSON.stringify(cluster));
+      localStorage.setItem('dfs_files', JSON.stringify(files));
+      renderNodes();
+      return fileId;
+    }
+
+    // initial setup
+    if(!loadCluster()) initCluster(parseInt($('numNodes').value,10));
+    renderNodes();
+
+    // events
+    $('numNodes').addEventListener('change', ()=>{
+      initCluster(parseInt($('numNodes').value,10));
+    });
+
+    $('clearBtn').addEventListener('click', ()=>{
+      if(confirm('Reset simulation? This clears stored files and nodes.')) resetSimulation();
+    });
+
+    $('fileInput').addEventListener('change', async (ev)=>{
+      const f = ev.target.files[0];
+      if(!f) return;
+      const txt = await f.text();
+      $('textArea').value = txt;
+    });
+
+    $('storeBtn').addEventListener('click', ()=>{
+      const text = $('textArea').value.trim();
+      if(!text){alert('Please provide text (either by uploading a text file or pasting).');return}
+      const rep = Math.max(1,parseInt($('repFactor').value,10));
+      const chunkSize = Math.max(10,parseInt($('chunkSize').value,10));
+      const fileId = storeFileSimulation(text, chunkSize, rep);
+      if(fileId){
+        alert('File stored with id: '+fileId);
+        // open execution page with file id
+        window.open('execute.html?file='+fileId,'_blank');
+      } else alert('Failed to store.');
+    });
+
+    $('goExec').addEventListener('click', ()=>{
+      window.open('execute.html','_blank');
+    });
+  </script>
+
+</body>
+</html>
